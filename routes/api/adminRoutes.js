@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
 const User = require('../../models/User');
+const Activity = require('../../models/Activity');
+const ActivityAssignment = require('../../models/ActivityAssignment');
 
 // ==================== MIDDLEWARE ====================
 const { protect } = require('../../middleware/auth');
@@ -977,6 +979,127 @@ router.get('/reports', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching reports',
+      error: error.message
+    });
+  }
+});
+
+// ==================== INCOMPLETE ACTIVITIES ====================
+
+/**
+ * @swagger
+ * /api/admin/incomplete-activities:
+ *   get:
+ *     tags:
+ *       - Admin - Reports
+ *     summary: Get incomplete activities of all children
+ *     description: View all not-completed and overdue activities across all children in the system
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved incomplete activities
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 total:
+ *                   type: integer
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       childId:
+ *                         type: string
+ *                       childName:
+ *                         type: string
+ *                       childEmail:
+ *                         type: string
+ *                       activityName:
+ *                         type: string
+ *                       status:
+ *                         type: string
+ *                       dueDate:
+ *                         type: string
+ *                       daysOverdue:
+ *                         type: integer
+ *                       therapistName:
+ *                         type: string
+ *                       therapistEmail:
+ *                         type: string
+ *       403:
+ *         description: Forbidden - User is not an admin
+ *       500:
+ *         description: Server error
+ */
+router.get('/incomplete-activities', protect, async (req, res) => {
+  try {
+    if (req.user.role !== 'superuser' && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can access this endpoint'
+      });
+    }
+
+    // Auto-mark overdue pending/in-progress assignments as not-completed
+    await ActivityAssignment.markOverduePending();
+
+    // Get all children
+    const allChildren = await User.find({
+      role: 'child',
+      isActive: true
+    }).select('_id Name email assignedTherapist').populate('assignedTherapist', 'Name email');
+
+    const incompleteActivities = [];
+
+    for (const child of allChildren) {
+      const assignments = await ActivityAssignment.find({
+        childId: child._id,
+        isActive: true
+      })
+        .populate('activityId', 'name dueDate')
+        .lean();
+
+      for (const assignment of assignments) {
+        const effectiveStatus = assignment.completionStatus === 'pending' || assignment.completionStatus === 'in-progress'
+          ? (assignment.activityId?.dueDate && new Date(assignment.activityId.dueDate) < new Date() ? 'not-completed' : assignment.completionStatus)
+          : assignment.completionStatus;
+
+        if (effectiveStatus === 'not-completed' || assignment.completionStatus === 'not-completed') {
+          const dueDate = assignment.activityId?.dueDate ? new Date(assignment.activityId.dueDate) : null;
+          const today = new Date();
+          const daysOverdue = dueDate ? Math.floor((today - dueDate) / (1000 * 60 * 60 * 24)) : 0;
+
+          incompleteActivities.push({
+            childId: child._id,
+            childName: child.Name,
+            childEmail: child.email,
+            activityName: assignment.activityId?.name || 'Unknown Activity',
+            status: effectiveStatus,
+            dueDate: dueDate,
+            daysOverdue: daysOverdue > 0 ? daysOverdue : 0,
+            therapistName: child.assignedTherapist?.Name || 'Not Assigned',
+            therapistEmail: child.assignedTherapist?.email || 'N/A',
+            assignmentId: assignment._id
+          });
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      total: incompleteActivities.length,
+      data: incompleteActivities
+    });
+  } catch (error) {
+    console.error('Error fetching incomplete activities:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching incomplete activities',
       error: error.message
     });
   }

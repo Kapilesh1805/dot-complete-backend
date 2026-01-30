@@ -407,4 +407,122 @@ router.post('/children', protect, [
   }
 });
 
+// ==================== INCOMPLETE ACTIVITIES ====================
+
+/**
+ * @swagger
+ * /api/therapist/incomplete-activities:
+ *   get:
+ *     tags:
+ *       - Therapist - Reports
+ *     summary: Get incomplete activities of therapist's assigned children
+ *     description: View all not-completed and overdue activities for children assigned to this therapist
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved incomplete activities
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 total:
+ *                   type: integer
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       childId:
+ *                         type: string
+ *                       childName:
+ *                         type: string
+ *                       childEmail:
+ *                         type: string
+ *                       activityName:
+ *                         type: string
+ *                       status:
+ *                         type: string
+ *                       dueDate:
+ *                         type: string
+ *                       daysOverdue:
+ *                         type: integer
+ *       403:
+ *         description: Forbidden - User is not a therapist
+ *       500:
+ *         description: Server error
+ */
+router.get('/incomplete-activities', protect, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    if (req.user.role !== 'therapist') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only therapists can access this endpoint'
+      });
+    }
+
+    // Auto-mark overdue pending/in-progress assignments as not-completed
+    await ActivityAssignment.markOverduePending();
+
+    // Get therapist's assigned children
+    const assignedChildren = await User.find({
+      assignedTherapist: userId,
+      role: 'child',
+      isActive: true
+    }).select('_id Name email');
+
+    const incompleteActivities = [];
+
+    for (const child of assignedChildren) {
+      const assignments = await ActivityAssignment.find({
+        childId: child._id,
+        isActive: true
+      })
+        .populate('activityId', 'name dueDate')
+        .lean();
+
+      for (const assignment of assignments) {
+        const effectiveStatus = assignment.completionStatus === 'pending' || assignment.completionStatus === 'in-progress'
+          ? (assignment.activityId?.dueDate && new Date(assignment.activityId.dueDate) < new Date() ? 'not-completed' : assignment.completionStatus)
+          : assignment.completionStatus;
+
+        if (effectiveStatus === 'not-completed' || assignment.completionStatus === 'not-completed') {
+          const dueDate = assignment.activityId?.dueDate ? new Date(assignment.activityId.dueDate) : null;
+          const today = new Date();
+          const daysOverdue = dueDate ? Math.floor((today - dueDate) / (1000 * 60 * 60 * 24)) : 0;
+
+          incompleteActivities.push({
+            childId: child._id,
+            childName: child.Name,
+            childEmail: child.email,
+            activityName: assignment.activityId?.name || 'Unknown Activity',
+            status: effectiveStatus,
+            dueDate: dueDate,
+            daysOverdue: daysOverdue > 0 ? daysOverdue : 0,
+            assignmentId: assignment._id
+          });
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      total: incompleteActivities.length,
+      data: incompleteActivities
+    });
+  } catch (error) {
+    console.error('Error fetching incomplete activities:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching incomplete activities',
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;
