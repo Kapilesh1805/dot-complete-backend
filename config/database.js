@@ -1,27 +1,38 @@
 const mongoose = require('mongoose');
 
 const connectDB = async () => {
-  try {
-    // Updated connection options for newer versions
-    const options = {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    };
+  // Retry logic: try to connect multiple times to handle transient network issues
+  const options = {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  };
 
-    console.log('🔄 Connecting to MongoDB Atlas...');
-    
-    const conn = await mongoose.connect(process.env.MONGO_URI, options);
+  const maxAttempts = 5;
+  let attempt = 0;
 
-    console.log('✅ MongoDB Atlas Connected Successfully!');
-    console.log(`📍 Host: ${conn.connection.host}`);
-    console.log(`🗄️  Database: ${conn.connection.name}`);
-    
-  } catch (error) {
-    console.error('❌ MongoDB Connection Error:', error.message);
-    console.error('💡 Check your MONGO_URI in .env file');
-    
-    // Exit process with failure
-    process.exit(1);
+  while (attempt < maxAttempts) {
+    attempt++;
+    try {
+      console.log(`🔄 Connecting to MongoDB Atlas... (Attempt ${attempt}/${maxAttempts})`);
+      const conn = await mongoose.connect(process.env.MONGO_URI, options);
+
+      console.log('✅ MongoDB Atlas Connected Successfully!');
+      console.log(`📍 Host: ${conn.connection.host}`);
+      console.log(`🗄️  Database: ${conn.connection.name}`);
+      return;
+    } catch (error) {
+      console.error(`❌ MongoDB Connection Error (attempt ${attempt}):`, error.message);
+      if (attempt < maxAttempts) {
+        const waitMs = 2000 * attempt; // exponential-ish backoff
+        console.log(`🔁 Retrying in ${waitMs / 1000}s...`);
+        await new Promise(res => setTimeout(res, waitMs));
+        continue;
+      } else {
+        console.error('❌ All connection attempts failed. Please verify MONGO_URI and network connectivity.');
+        // Exit process with failure
+        process.exit(1);
+      }
+    }
   }
 };
 
@@ -34,8 +45,28 @@ mongoose.connection.on('error', (err) => {
   console.error('❌ Mongoose connection error:', err.message);
 });
 
-mongoose.connection.on('disconnected', () => {
+let _reconnectAttempts = 0;
+const _maxReconnectAttempts = 5;
+
+mongoose.connection.on('disconnected', async () => {
   console.log('⚠️ Mongoose disconnected from MongoDB Atlas');
+
+  if (_reconnectAttempts >= _maxReconnectAttempts) {
+    console.error('❌ Maximum reconnection attempts reached after disconnect. Exiting process.');
+    process.exit(1);
+  }
+
+  _reconnectAttempts++;
+  const waitMs = 3000 * _reconnectAttempts;
+  console.log(`🔁 Attempting reconnection (${_reconnectAttempts}/${_maxReconnectAttempts}) in ${waitMs / 1000}s...`);
+  await new Promise(res => setTimeout(res, waitMs));
+  try {
+    await connectDB();
+    console.log('🔌 Reconnection to MongoDB successful.');
+    _reconnectAttempts = 0; // reset on success
+  } catch (err) {
+    console.error('❌ Reconnection attempt failed:', err.message || err);
+  }
 });
 
 // Graceful close on app termination

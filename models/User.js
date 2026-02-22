@@ -15,10 +15,29 @@ const userSchema = new mongoose.Schema({
 
   // ==================== CONTACT ====================
   phoneNumber: { type: String, trim: true, match: [/^[\+]?[1-9][\d]{0,15}$/, 'Please provide a valid phone number'], default: null },
+  parentName: { type: String, trim: true, maxlength: 100, default: '' },
   
   // ==================== PERSONAL INFO ====================
+  // Add firstName and lastName to support API/virtuals and prevent undefined values
+  firstName: { type: String, trim: true, maxlength: 50, default: '' },
+  lastName: { type: String, trim: true, maxlength: 50, default: '' },
   dateOfBirth: { type: Date, validate: { validator: d => d <= new Date(), message: 'Date of birth cannot be in the future' } },
-  gender: { type: String, enum: ['male', 'female', 'other', 'prefer-not-to-say'] },
+  gender: {
+    type: String,
+    enum: ['male', 'female', 'other'],
+    trim: true,
+    lowercase: true,
+    default: null,
+    set: (value) => {
+      if (value === undefined || value === null) return null;
+      const normalized = String(value).trim().toLowerCase();
+      if (!normalized) return null;
+      if (normalized === 'prefer-not-to-say') return 'other'; // backward-compatible legacy value
+      return ['male', 'female', 'other'].includes(normalized) ? normalized : null;
+    }
+  },
+  // Condition / diagnostic field for children (free-text, stored on user record)
+  condition: { type: String, trim: true, maxlength: 200, default: '' },
 
   // ==================== PROFILE & MEDIA ====================
   profilePicture: { type: String, default: '' },
@@ -62,6 +81,14 @@ const userSchema = new mongoose.Schema({
   },
   deviceTokens: { type: [String], default: [] },
 
+  // Refresh tokens (hashed) for rotating refresh token support
+  refreshTokens: [{
+    token: { type: String },
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date },
+    createdByIp: { type: String, default: '' }
+  }],
+
   // ==================== SECURITY ====================
   passwordResetToken: String,
   passwordResetExpires: Date,
@@ -96,7 +123,11 @@ const userSchema = new mongoose.Schema({
 });
 
 // ==================== VIRTUALS ====================
-userSchema.virtual('fullName').get(function() { return `${this.firstName} ${this.lastName}`; });
+userSchema.virtual('fullName').get(function() { 
+  // Prefer the legacy `Name` field if present, otherwise build from firstName/lastName
+  if (this.Name && this.Name.trim().length > 0) return this.Name; 
+  return `${this.firstName || ''} ${this.lastName || ''}`.trim();
+});
 userSchema.virtual('age').get(function() {
   if (!this.dateOfBirth) return null;
   const today = new Date();
@@ -115,6 +146,23 @@ userSchema.index({ parentId: 1 });
 userSchema.index({ deviceTokens: 1 });
 
 // ==================== MIDDLEWARE ====================
+userSchema.pre('validate', function(next) {
+  // Normalize legacy/variant gender values before validation to avoid breaking existing users.
+  if (this.gender !== undefined && this.gender !== null) {
+    const normalized = String(this.gender).trim().toLowerCase();
+    if (!normalized) {
+      this.gender = null;
+    } else if (normalized === 'prefer-not-to-say') {
+      this.gender = 'other';
+    } else if (!['male', 'female', 'other'].includes(normalized)) {
+      this.gender = null;
+    } else {
+      this.gender = normalized;
+    }
+  }
+  next();
+});
+
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   const salt = await bcrypt.genSalt(12);

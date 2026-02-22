@@ -10,7 +10,9 @@ const {
   logout,
   forgotPassword,
   forgotPasswordDebug,
-  resetPassword
+  resetPassword,
+  bootstrapSuperAdmin,
+  refresh
 } = require('../../controllers/authController');
 
 // ==================== MIDDLEWARE ====================
@@ -66,6 +68,43 @@ const { validateRegistration, validateLogin, handleValidationErrors } = require(
  *         description: User registered successfully
  */
 router.post('/register', validateRegistration, register);
+
+/**
+ * @swagger
+ * /api/auth/bootstrap-superadmin:
+ *   post:
+ *     summary: Bootstrap a superuser (dev/secret-protected)
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - email
+ *               - password
+ *             properties:
+ *               name:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               password:
+ *                 type: string
+ *               secret:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Superuser created
+ */
+router.post('/bootstrap-superadmin', [
+  body('name').notEmpty(),
+  body('email').isEmail().normalizeEmail(),
+  body('password').isLength({ min: 6 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/),
+  handleValidationErrors
+], bootstrapSuperAdmin);
 
 /**
  * @swagger
@@ -175,6 +214,11 @@ router.post('/reset-password', [
   body('password').isLength({ min: 6 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/),
   handleValidationErrors
 ], resetPassword);
+
+// //////////////////////
+// Refresh token route
+// //////////////////////
+router.post('/refresh', refresh);
 
 // ==================== PROTECTED ROUTES ====================
 

@@ -61,22 +61,32 @@ router.get('/activities', protect, async (req, res) => {
       })
       .sort({ createdAt: -1 });
 
-    const activities = assignments.map(assignment => ({
-      assignmentId: assignment._id,
-      activityId: assignment.activityId._id,
-      name: assignment.activityId.name,
-      description: assignment.activityId.description,
-      steps: assignment.activityId.steps,
-      assistance: assignment.activityId.assistance,
-      mediaUrls: assignment.activityId.mediaUrls,
-      dueDate: assignment.activityId.dueDate,
-      completionStatus: assignment.getEffectiveStatus(),
-      score: assignment.score,
-      completionVideoUrl: assignment.completionVideoUrl,
-      startedDate: assignment.startedDate,
-      completedDate: assignment.completedDate,
-      isOverdue: assignment.isOverdue()
-    }));
+    const activities = assignments
+      .filter((assignment) => assignment.activityId)
+      .map((assignment) => {
+        const assistance = assignment.activityId.assistance || null;
+        const dueDate = assignment.dueDate || assignment.activityId.dueDate || null;
+
+        return {
+          assignmentId: assignment._id,
+          activityId: assignment.activityId._id,
+          name: assignment.activityId.name,
+          description: assignment.activityId.description,
+          steps: assignment.activityId.steps,
+          assistance,
+          assistanceModification: assistance ? [assistance] : [],
+          assistance_modification: assistance,
+          mediaUrls: assignment.activityId.mediaUrls,
+          dueDate,
+          due_date: dueDate,
+          completionStatus: assignment.getEffectiveStatus(),
+          score: assignment.score,
+          completionVideoUrl: assignment.completionVideoUrl,
+          startedDate: assignment.startedDate,
+          completedDate: assignment.completedDate,
+          isOverdue: assignment.isOverdue()
+        };
+      });
 
     res.status(200).json({
       success: true,
@@ -138,15 +148,39 @@ router.get('/activities', protect, async (req, res) => {
  *       500:
  *         description: Server error
  */
-router.put('/activities/:assignmentId/submit', protect, [
-  body('completionVideoUrl').isURL().withMessage('Valid video URL is required'),
-  body('score').optional().isInt({ min: 0, max: 100 }).withMessage('Score must be between 0 and 100'),
-  handleValidationErrors
-], async (req, res) => {
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Setup storage for child activity uploads (make sure this is available to routes below)
+const ensureDir = (dir) => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+};
+
+const videoUploadDir = path.join(process.cwd(), 'uploads', 'child-activity-videos');
+ensureDir(videoUploadDir);
+
+const videoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, videoUploadDir),
+  filename: (req, file, cb) => {
+    const timestamp = Date.now();
+    const safeBase = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${timestamp}_${safeBase}`);
+  }
+});
+
+const videoFileFilter = (req, file, cb) => {
+  const allowed = ['video/mp4','video/quicktime','video/x-msvideo','video/x-matroska','audio/mpeg'];
+  if (allowed.includes(file.mimetype)) return cb(null, true);
+  cb(new Error('Invalid file type. Only MP4/QuickTime/AVI/MKV or MP3 are allowed.'));
+};
+
+const uploadVideo = multer({ storage: videoStorage, limits: { fileSize: 200 * 1024 * 1024 }, fileFilter: videoFileFilter });
+
+router.put('/activities/:assignmentId/submit', protect, async (req, res) => {
   try {
-    const childId = req.user.id;
     const { assignmentId } = req.params;
-    const { completionVideoUrl, score } = req.body;
+    const { videoUrl } = req.body || {};
 
     if (req.user.role !== 'child') {
       return res.status(403).json({
@@ -155,57 +189,56 @@ router.put('/activities/:assignmentId/submit', protect, [
       });
     }
 
-    const assignment = await ActivityAssignment.findOne({
-      _id: assignmentId,
-      childId,
-      isActive: true
-    }).populate('activityId', 'name');
+    const assignment = await ActivityAssignment.findById(assignmentId);
 
     if (!assignment) {
-      return res.status(404).json({
+      return res.status(404).json({ success: false, message: 'Activity assignment not found' });
+    }
+
+    if (!assignment.isActive) {
+      return res.status(404).json({ success: false, message: 'Activity assignment not found' });
+    }
+
+    if (assignment.childId?.toString() !== req.user.id) {
+      return res.status(403).json({
         success: false,
-        message: 'Activity assignment not found'
+        message: 'You are not allowed to submit for this assignment'
       });
     }
 
-    if (assignment.completionStatus === 'completed') {
+    if (!videoUrl || typeof videoUrl !== 'string') {
       return res.status(400).json({
         success: false,
-        message: 'Activity already completed'
+        message: 'Video URL is required'
+      });
+    }
+    const normalizedVideoUrl = videoUrl.trim();
+    if (!normalizedVideoUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Video URL is required'
       });
     }
 
-    const updatedAssignment = await ActivityAssignment.findByIdAndUpdate(
-      assignmentId,
-      {
-        completionStatus: 'completed',
-        completionVideoUrl,
-        score: score || null,
-        completedDate: new Date(),
-        startedDate: assignment.startedDate || new Date()
-      },
-      { new: true, runValidators: false }
-    ).populate('activityId', 'name');
+    assignment.completionVideoUrl = normalizedVideoUrl;
+    assignment.completionStatus = 'submitted';
+    if (!assignment.startedDate) {
+      assignment.startedDate = new Date();
+    }
+    await assignment.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: 'Activity submitted successfully',
+      message: 'Video link submitted successfully',
       data: {
-        assignmentId: updatedAssignment._id,
-        activityName: updatedAssignment.activityId.name,
-        completionStatus: updatedAssignment.completionStatus,
-        completionVideoUrl: updatedAssignment.completionVideoUrl,
-        score: updatedAssignment.score,
-        completedDate: updatedAssignment.completedDate
+        assignmentId: assignment._id,
+        completionStatus: assignment.completionStatus,
+        completionVideoUrl: assignment.completionVideoUrl
       }
     });
   } catch (error) {
     console.error('Error submitting activity:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error submitting activity',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error submitting activity', error: error.message });
   }
 });
 
@@ -300,6 +333,108 @@ router.put('/activities/:assignmentId/start', protect, async (req, res) => {
 });
 
 // ==================== CHILD REPORTS ====================
+
+// -------------------- Video Upload for Activity Completion --------------------
+/**
+ * @swagger
+ * /api/child/activities/{assignmentId}/upload:
+ *   post:
+ *     tags:
+ *       - Child - Activities
+ *     summary: Upload a completed activity video
+ *     description: Accepts multipart/form-data with a single file field `videoFile` and returns a publicly accessible URL for the uploaded video.
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: assignmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The activity assignment ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               videoFile:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       200:
+ *         description: File uploaded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 url:
+ *                   type: string
+ */
+// video upload storage / multer configuration moved above to be available to submit endpoint
+
+router.post('/activities/:assignmentId/upload', protect, uploadVideo.single('videoFile'), async (req, res) => {
+  try {
+    // Only children can upload for their assignments
+    if (req.user.role !== 'child') {
+      return res.status(403).json({ success: false, message: 'Only children can upload activity videos' });
+    }
+
+    const { assignmentId } = req.params;
+    const assignment = await ActivityAssignment.findById(assignmentId);
+    if (!assignment) {
+      return res.status(404).json({ success: false, message: 'Activity assignment not found' });
+    }
+
+    const assignmentChildId =
+      (assignment.childId && assignment.childId.toString()) ||
+      (assignment.child && assignment.child.toString()) ||
+      '';
+    if (assignmentChildId !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'You are not allowed to upload for this assignment' });
+    }
+
+    if (!assignment.isActive) {
+      return res.status(404).json({ success: false, message: 'Activity assignment not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Video file is required' });
+    }
+
+    const publicUrl = `${req.protocol}://${req.get('host')}/uploads/child-activity-videos/${req.file.filename}`;
+    assignment.completionVideoUrl = publicUrl;
+    assignment.completionStatus = 'submitted';
+    if (!assignment.startedDate) {
+      assignment.startedDate = new Date();
+    }
+    await assignment.save();
+
+    console.log('UPLOAD DEBUG:', {
+      assignmentId,
+      status: assignment.completionStatus,
+      video: assignment.completionVideoUrl
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Video uploaded successfully',
+      data: {
+        assignmentId: assignment._id,
+        completionStatus: assignment.completionStatus,
+        completionVideoUrl: assignment.completionVideoUrl
+      },
+      url: publicUrl
+    });
+  } catch (error) {
+    console.error('Error uploading video:', error);
+    res.status(500).json({ success: false, message: 'Error uploading video', error: error.message });
+  }
+});
 
 /**
  * @swagger

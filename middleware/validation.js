@@ -86,7 +86,8 @@ const validateRegistration = [
   
   body('role')
     .optional()
-    .isIn(['superuser', 'hospital', 'therapist', 'child'])
+    // Accept common variants from frontend: 'super_admin', 'superadmin', 'admin', as well as canonical 'superuser'
+    .isIn(['superuser', 'superadmin', 'super_admin', 'admin', 'hospital', 'therapist', 'child', 'children'])
     .withMessage('Invalid role'),
     
   handleValidationErrors

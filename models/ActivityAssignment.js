@@ -16,7 +16,7 @@ const activityAssignmentSchema = new mongoose.Schema({
   // ==================== ASSIGNMENT STATUS ====================
   completionStatus: { 
     type: String, 
-    enum: ['pending', 'in-progress', 'completed', 'not-completed'],
+    enum: ['pending', 'in-progress', 'submitted', 'completed', 'not-completed'],
     default: 'pending'
   },
   score: { 
@@ -48,6 +48,24 @@ const activityAssignmentSchema = new mongoose.Schema({
 
   // ==================== STATUS ====================
   isActive: { type: Boolean, default: true },
+
+  // ==================== THERAPIST ====================
+  therapistId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Therapist' 
+  },
+
+  // ==================== ACTIVITY NAME ====================
+  activityName: { 
+    type: String, 
+    required: true 
+  },
+
+  // ==================== VIDEO SUBMISSION ====================
+  videoSubmitted: { 
+    type: Boolean, 
+    default: false 
+  }
 
 }, { timestamps: true });
 

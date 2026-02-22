@@ -417,4 +417,41 @@ describe('Activity Completion Tracking API', () => {
       expect(response.body.data.statistics.completionRate).toBe(0);
     });
   });
+
+  // New tests for Missing Activity List and Activity List APIs
+  describe('Activity List and Missing Activity List APIs', () => {
+    // Test: Get Missing Activities
+    describe('GET /api/activities/missing', () => {
+      it('should return a list of missing activities', async () => {
+        const response = await request(app).get('/api/activities/missing');
+        expect(response.status).toBe(200);
+        expect(Array.isArray(response.body)).toBe(true);
+      });
+
+      it('should return a list of missing activities where videoSubmitted is false', async () => {
+        // Mock data
+        await ActivityAssignment.create({
+          activityName: 'Speech Therapy',
+          completionStatus: 'in-progress',
+          dueDate: new Date('2026-02-01'),
+          videoSubmitted: false,
+          childId: 'child_001',
+        });
+
+        const response = await request(app).get('/api/activities/missing');
+        expect(response.status).toBe(200);
+        expect(Array.isArray(response.body)).toBe(true);
+        expect(response.body[0].videoSubmitted).toBe(false);
+      });
+    });
+
+    // Test: Get All Activities
+    describe('GET /api/activities/list', () => {
+      it('should return a list of all activities', async () => {
+        const response = await request(app).get('/api/activities/list');
+        expect(response.status).toBe(200);
+        expect(Array.isArray(response.body)).toBe(true);
+      });
+    });
+  });
 });

@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { body } = require('express-validator');
+const mongoose = require('mongoose');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const User = require('../../models/User');
 const Activity = require('../../models/Activity');
 const ActivityAssignment = require('../../models/ActivityAssignment');
@@ -8,6 +12,51 @@ const ActivityAssignment = require('../../models/ActivityAssignment');
 // ==================== MIDDLEWARE ====================
 const { protect } = require('../../middleware/auth');
 const { handleValidationErrors } = require('../../middleware/validation');
+
+const ensureActivityImageDir = (dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+};
+
+const activityImageUploadDir = path.join(process.cwd(), 'uploads', 'activity-images');
+ensureActivityImageDir(activityImageUploadDir);
+
+const activityImageStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, activityImageUploadDir),
+  filename: (req, file, cb) => {
+    const timestamp = Date.now();
+    const safeBase = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${timestamp}_${safeBase}`);
+  }
+});
+
+const activityImageFileFilter = (req, file, cb) => {
+  const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+  if (allowed.includes(file.mimetype)) return cb(null, true);
+  cb(new Error('Invalid file type. Only PNG/JPEG/WEBP/GIF are allowed.'));
+};
+
+const uploadActivityImage = multer({
+  storage: activityImageStorage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: activityImageFileFilter
+});
+
+const parseArrayField = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  return [];
+};
 
 // ==================== HELPER FUNCTION ====================
 const setAuthCookie = (res, token) => {
@@ -33,7 +82,179 @@ const generateToken = (user) => {
   );
 };
 
+const ADMIN_ROLES = ['superuser', 'admin'];
+const IN_PROGRESS_STATUSES = ['in-progress', 'submitted'];
+const PENDING_STATUSES = ['pending', 'not-completed'];
+const DEFAULT_REPORT_STATS = Object.freeze({
+  total: 0,
+  completed: 0,
+  inProgress: 0,
+  pending: 0,
+  completionRate: 0,
+  lastActivityDate: null
+});
+
+const toPositiveInt = (value, fallback) => {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+};
+
+const toBooleanQuery = (value, fallback = true) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  return !['false', '0', 'no'].includes(normalized);
+};
+
+const toIsoOrNull = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
+const toDaysOverdue = (dueDate, now) => {
+  if (!dueDate) return 0;
+  const due = new Date(dueDate);
+  if (Number.isNaN(due.getTime())) return 0;
+  const diffMs = now.getTime() - due.getTime();
+  if (diffMs <= 0) return 0;
+  return Math.max(1, Math.floor(diffMs / MILLISECONDS_PER_DAY));
+};
+
+const buildOverdueAssignmentFilter = (now, extraFilter = {}) => ({
+  isActive: true,
+  dueDate: { $ne: null, $lt: now },
+  completionStatus: { $ne: 'completed' },
+  ...extraFilter
+});
+
+const mapAssignmentToOverdueAlert = (assignment, now) => {
+  const child = assignment.childId;
+  const childId = child && typeof child === 'object' && child._id
+    ? child._id.toString()
+    : assignment.childId?.toString() || '';
+
+  const therapist = child && typeof child === 'object' && child.assignedTherapist
+    ? child.assignedTherapist
+    : null;
+
+  const therapistId = therapist && typeof therapist === 'object' && therapist._id
+    ? therapist._id.toString()
+    : '';
+
+  const activity = assignment.activityId;
+  const activityId = activity && typeof activity === 'object' && activity._id
+    ? activity._id.toString()
+    : assignment.activityId?.toString() || '';
+
+  return {
+    assignmentId: assignment._id?.toString() || '',
+    childId,
+    childName: child && typeof child === 'object' && child.Name ? child.Name : 'Unknown Child',
+    activityId,
+    activityName: assignment.activityName || (activity && typeof activity === 'object' ? activity.name : '') || 'Unknown Activity',
+    therapistId,
+    therapistName: therapist && typeof therapist === 'object' && therapist.Name ? therapist.Name : 'Not Assigned',
+    dueDate: toIsoOrNull(assignment.dueDate) || '',
+    daysOverdue: toDaysOverdue(assignment.dueDate, now),
+    completionStatus: (assignment.completionStatus || 'pending').toString()
+  };
+};
+
+const buildRecentActivityMessage = (status, childName) => {
+  const safeName = childName || 'Unknown Child';
+  switch (status) {
+    case 'completed':
+      return `Child ${safeName} completed an activity`;
+    case 'in-progress':
+      return `Child ${safeName} started an activity`;
+    case 'submitted':
+      return `Activity submitted by ${safeName}`;
+    case 'not-completed':
+      return `Activity not completed by ${safeName}`;
+    case 'pending':
+      return `Pending activity for ${safeName}`;
+    default:
+      return `Activity updated for ${safeName}`;
+  }
+};
+
+const buildChildStatsMap = async (childIds) => {
+  if (!childIds.length) return new Map();
+
+  const aggregated = await ActivityAssignment.aggregate([
+    {
+      $match: {
+        isActive: true,
+        childId: { $in: childIds }
+      }
+    },
+    {
+      $group: {
+        _id: '$childId',
+        total: { $sum: 1 },
+        completed: {
+          $sum: {
+            $cond: [{ $eq: ['$completionStatus', 'completed'] }, 1, 0]
+          }
+        },
+        inProgress: {
+          $sum: {
+            $cond: [{ $in: ['$completionStatus', IN_PROGRESS_STATUSES] }, 1, 0]
+          }
+        },
+        pending: {
+          $sum: {
+            $cond: [{ $in: ['$completionStatus', PENDING_STATUSES] }, 1, 0]
+          }
+        },
+        // Keep this date independent from automatic overdue status updates.
+        lastActivityDate: {
+          $max: {
+            $ifNull: [
+              '$completedDate',
+              {
+                $ifNull: ['$startedDate', '$createdAt']
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]);
+
+  const statsMap = new Map();
+  for (const row of aggregated) {
+    const total = row.total || 0;
+    const completed = row.completed || 0;
+    const inProgress = row.inProgress || 0;
+    const pending = row.pending || 0;
+    const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+    statsMap.set(row._id.toString(), {
+      total,
+      completed,
+      inProgress,
+      pending,
+      completionRate,
+      lastActivityDate: row.lastActivityDate || null
+    });
+  }
+  return statsMap;
+};
+
 // ==================== THERAPIST MANAGEMENT ====================
+
+// Middleware: enforce admin-only for assign-therapist admin endpoints
+// This ensures any PUT to /admin/children/:id/assign-therapist must be done by a superuser
+router.use('/children/:id/assign-therapist', protect, (req, res, next) => {
+  if (req.user.role !== 'superuser') {
+    return res.status(403).json({ success: false, message: 'Only admin can assign therapist to this child' });
+  }
+  next();
+});
 
 /**
  * @swagger
@@ -126,6 +347,15 @@ router.post('/therapists', protect, [
 ], async (req, res) => {
   try {
     const { name, email, password, qualification, experience, specialization, phoneNumber, gender, dateOfBirth } = req.body;
+    const normalizedGender = typeof gender === 'string'
+      ? (() => {
+          const g = gender.trim().toLowerCase();
+          if (!g) return null;
+          if (g === 'prefer-not-to-say') return 'other';
+          return ['male', 'female', 'other'].includes(g) ? g : null;
+        })()
+      : null;
+    const normalizedPhone = phoneNumber ?? req.body.contactNo ?? null;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -152,8 +382,8 @@ router.post('/therapists', protect, [
       qualification: qualification || null,
       experience: experience || null,
       specialization: specialization || null,
-      phoneNumber: phoneNumber || null,
-      gender: gender || null,
+      phoneNumber: normalizedPhone,
+      gender: normalizedGender,
       dateOfBirth: dateOfBirth || null,
       isActive: true,
       isEmailVerified: true
@@ -280,7 +510,7 @@ router.post('/children', protect, [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { name, email, password, gender, dateOfBirth, phoneNumber, assignedTherapist } = req.body;
+    const { name, email, password, gender, dateOfBirth, phoneNumber, assignedTherapist, parentName, condition } = req.body; 
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -307,6 +537,8 @@ router.post('/children', protect, [
       gender: gender || null,
       dateOfBirth: dateOfBirth || null,
       phoneNumber: phoneNumber || null,
+      parentName: parentName || '',
+      condition: condition || null,
       assignedTherapist: assignedTherapist || null,
       isActive: true,
       isEmailVerified: true
@@ -325,6 +557,7 @@ router.post('/children', protect, [
         role: child.role,
         gender: child.gender,
         dateOfBirth: child.dateOfBirth,
+        condition: child.condition,
         assignedTherapist: child.assignedTherapist
       }
     });
@@ -735,6 +968,89 @@ router.get('/user/:id', protect, async (req, res) => {
   }
 });
 
+// Update user (admin)
+router.put('/user/:id', protect, [
+  // email is optional but must be valid if provided
+  body('email').optional().isEmail().normalizeEmail().withMessage('Valid email is required'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Debug logging: help trace incoming update requests and auth method
+    console.log(`PUT /api/admin/user/${id} - headers.authorization: ${req.headers.authorization ? 'present' : 'absent'}, cookie.authToken: ${req.cookies && req.cookies.authToken ? 'present' : 'absent'}`);
+    console.log('Update payload keys:', Object.keys(req.body));
+
+    // Allow only specific updatable fields from admin
+    const allowed = ['Name','name','firstName','lastName','age','gender','condition','contactNo','phoneNumber','email','address','qualification','experience','specialization','parentName','dateOfBirth'];
+    const updates = {};
+    for (const field of allowed) {
+      if (req.body[field] !== undefined) updates[field] = req.body[field];
+    }
+
+    // Map friendly frontend keys to schema fields (legacy `Name` is the canonical name field in the User schema)
+    if (req.body.name !== undefined && updates.Name === undefined) {
+      updates.Name = req.body.name;
+      // remove lowercase name to avoid creating a new field
+      delete updates.name;
+    }
+
+    // Parent name mapping
+    if (req.body.parentName !== undefined && updates.parentName === undefined) {
+      updates.parentName = req.body.parentName;
+    }
+
+    // Condition mapping (also accept 'grade' as a friendly field)
+    if (req.body.condition !== undefined && updates.condition === undefined) {
+      updates.condition = req.body.condition;
+    }
+    if (req.body.grade !== undefined && updates.condition === undefined) {
+      updates.condition = req.body.grade;
+      delete updates.grade;
+    }
+
+    // Common parent/contact keys from frontend
+    if (req.body.parentContact !== undefined && updates.phoneNumber === undefined) {
+      updates.phoneNumber = req.body.parentContact;
+    }
+
+    // Map therapist/admin contact keys to canonical phoneNumber so phone is persisted
+    if (req.body.contactNo !== undefined && updates.phoneNumber === undefined) {
+      updates.phoneNumber = req.body.contactNo;
+      // remove contactNo to avoid creating an extra field
+      delete updates.contactNo;
+    }
+    if (req.body.contact !== undefined && updates.phoneNumber === undefined) {
+      updates.phoneNumber = req.body.contact;
+      delete updates.contact;
+    }
+
+    // Log final updates for debugging
+    console.log('Final update object being applied:', updates);
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'No update fields provided' });
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(id, updates, { new: true, runValidators: false })
+      .select('-password -passwordResetToken -emailVerificationToken')
+      .populate('assignedTherapist', 'Name email');
+
+    if (!updatedUser) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'User updated successfully',
+      data: updatedUser
+    });
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ success: false, message: 'Error updating user', error: error.message });
+  }
+});
+
 // ==================== ADMIN ACTIVITY MANAGEMENT ====================
 
 /**
@@ -773,17 +1089,25 @@ router.get('/user/:id', protect, async (req, res) => {
  *       201:
  *         description: Activity created and assigned to all children
  */
-router.post('/activities', protect, [
+router.post('/activities', protect, uploadActivityImage.single('image'), [
   body('name').trim().notEmpty().withMessage('Activity name is required'),
   body('description').trim().notEmpty().withMessage('Description is required'),
-  body('steps').isArray({ min: 1 }).withMessage('At least one step is required'),
+  body('steps').custom((value) => {
+    const parsedSteps = parseArrayField(value);
+    if (!Array.isArray(parsedSteps) || parsedSteps.length < 1) {
+      throw new Error('At least one step is required');
+    }
+    return true;
+  }),
   handleValidationErrors
 ], async (req, res) => {
   try {
     const Activity = require('../../models/Activity');
     const ActivityAssignment = require('../../models/ActivityAssignment');
     
-    const { name, description, steps, assistance, mediaUrls, dueDate } = req.body;
+    const { name, description, assistance, dueDate } = req.body;
+    const steps = parseArrayField(req.body.steps);
+    const mediaUrls = parseArrayField(req.body.mediaUrls);
     const userId = req.user.id;
     const userRole = req.user.role;
 
@@ -796,20 +1120,43 @@ router.post('/activities', protect, [
     }
 
     // Format steps properly (convert to objects with stepNumber and description)
-    const formattedSteps = steps && steps.length > 0 
-      ? steps.map((step, index) => ({
+    const formattedSteps = steps
+      .map((step, index) => {
+        const descriptionText = typeof step === 'string'
+          ? step.trim()
+          : (step && typeof step.description === 'string' ? step.description.trim() : '');
+        return {
           stepNumber: index + 1,
-          description: typeof step === 'string' ? step : step.description || ''
-        }))
-      : [];
+          description: descriptionText
+        };
+      })
+      .filter((step) => step.description.length > 0);
+
+    if (!formattedSteps.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one step is required'
+      });
+    }
 
     // Format mediaUrls properly (convert to objects with url and type)
-    const formattedMediaUrls = mediaUrls && mediaUrls.length > 0
-      ? mediaUrls.map(media => ({
-          url: typeof media === 'string' ? media : media.url || '',
-          type: (typeof media === 'string' ? 'image' : media.type) || 'image'
-        }))
-      : [];
+    const formattedMediaUrls = mediaUrls
+      .map((media) => {
+        const url = typeof media === 'string'
+          ? media.trim()
+          : (media && typeof media.url === 'string' ? media.url.trim() : '');
+        if (!url) return null;
+        const type = (media && typeof media === 'object' && media.type === 'video')
+          ? 'video'
+          : 'image';
+        return { url, type };
+      })
+      .filter(Boolean);
+
+    if (req.file) {
+      const imageUrl = `${req.protocol}://${req.get('host')}/uploads/activity-images/${req.file.filename}`;
+      formattedMediaUrls.unshift({ url: imageUrl, type: 'image' });
+    }
 
     // Create activity
     const activity = await Activity.create({
@@ -831,6 +1178,7 @@ router.post('/activities', protect, [
 
     const assignments = allChildren.map(child => ({
       activityId: activity._id,
+      activityName: activity.name,
       childId: child._id,
       dueDate: dueDate || null,
       completionStatus: 'pending'
@@ -846,6 +1194,7 @@ router.post('/activities', protect, [
       data: {
         activityId: activity._id,
         name: activity.name,
+        mediaUrls: activity.mediaUrls,
         assignedTo: assignments.length
       }
     });
@@ -898,6 +1247,240 @@ router.get('/activities', protect, async (req, res) => {
 });
 
 // ==================== ADMIN REPORTS ====================
+
+router.get('/dashboard-summary', protect, async (req, res) => {
+  try {
+    if (!ADMIN_ROLES.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can access this endpoint'
+      });
+    }
+
+    const recentLimit = Math.min(toPositiveInt(req.query.recentLimit, 6), 10);
+
+    const [
+      totalTherapists,
+      totalChildren,
+      activePrograms,
+      pendingPrograms,
+      recentAssignments
+    ] = await Promise.all([
+      User.countDocuments({ role: 'therapist', isActive: true }),
+      User.countDocuments({ role: 'child', isActive: true }),
+      ActivityAssignment.countDocuments({
+        isActive: true,
+        completionStatus: { $in: IN_PROGRESS_STATUSES }
+      }),
+      ActivityAssignment.countDocuments({
+        isActive: true,
+        completionStatus: { $in: PENDING_STATUSES }
+      }),
+      ActivityAssignment.find({ isActive: true })
+        .select('completionStatus updatedAt createdAt childId')
+        .populate('childId', 'Name')
+        .sort({ updatedAt: -1 })
+        .limit(recentLimit)
+        .lean()
+    ]);
+
+    const recentActivities = recentAssignments.map((assignment) => {
+      const child = assignment.childId;
+      const childName = child && typeof child === 'object' && child.Name
+        ? child.Name
+        : 'Unknown Child';
+      const type = (assignment.completionStatus || 'updated').toString();
+      return {
+        type,
+        message: buildRecentActivityMessage(type, childName),
+        timestamp: toIsoOrNull(assignment.updatedAt || assignment.createdAt || new Date())
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        stats: {
+          totalTherapists,
+          totalChildren,
+          activePrograms,
+          pendingPrograms
+        },
+        recentActivities
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard summary:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching dashboard summary',
+      error: error.message
+    });
+  }
+});
+
+router.get('/reports/children-summary', protect, async (req, res) => {
+  try {
+    if (!ADMIN_ROLES.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can access this endpoint'
+      });
+    }
+
+    await ActivityAssignment.markOverduePending();
+
+    const page = toPositiveInt(req.query.page, 1);
+    const limit = Math.min(toPositiveInt(req.query.limit, 10), 100);
+    const skip = (page - 1) * limit;
+
+    const childFilter = {
+      role: 'child',
+      isActive: true
+    };
+
+    const total = await User.countDocuments(childFilter);
+
+    const children = await User.find(childFilter)
+      .select('_id Name assignedTherapist')
+      .populate('assignedTherapist', 'Name')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const childIds = children.map((child) => child._id);
+    const statsMap = await buildChildStatsMap(childIds);
+
+    const data = children.map((child) => {
+      const childId = child._id.toString();
+      const stats = statsMap.get(childId) || DEFAULT_REPORT_STATS;
+      const therapist = child.assignedTherapist;
+      return {
+        childId,
+        childName: child.Name || 'Unknown',
+        therapistId: therapist?._id ? therapist._id.toString() : null,
+        therapistName: therapist?.Name || 'Not Assigned',
+        stats: {
+          total: stats.total,
+          completed: stats.completed,
+          inProgress: stats.inProgress,
+          pending: stats.pending,
+          completionRate: stats.completionRate
+        },
+        lastActivityDate: toIsoOrNull(stats.lastActivityDate)
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      total,
+      page,
+      limit,
+      data
+    });
+  } catch (error) {
+    console.error('Error fetching children summary reports:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching children summary reports',
+      error: error.message
+    });
+  }
+});
+
+router.get('/reports/child/:childId', protect, async (req, res) => {
+  try {
+    if (!ADMIN_ROLES.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can access this endpoint'
+      });
+    }
+
+    const { childId } = req.params;
+    const includeActivities = toBooleanQuery(req.query.includeActivities, true);
+    if (!mongoose.Types.ObjectId.isValid(childId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid child ID'
+      });
+    }
+
+    await ActivityAssignment.markOverduePending();
+
+    const child = await User.findOne({
+      _id: childId,
+      role: 'child',
+      isActive: true
+    })
+      .select('_id Name email assignedTherapist')
+      .populate('assignedTherapist', 'Name email')
+      .lean();
+
+    if (!child) {
+      return res.status(404).json({
+        success: false,
+        message: 'Child not found'
+      });
+    }
+
+    const statsMap = await buildChildStatsMap([child._id]);
+    const stats = statsMap.get(child._id.toString()) || DEFAULT_REPORT_STATS;
+
+    let activities = [];
+    if (includeActivities) {
+      const assignments = await ActivityAssignment.find({
+        childId: child._id,
+        isActive: true
+      })
+        .populate('activityId', 'name description')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      activities = assignments.map((assignment) => ({
+        assignmentId: assignment._id.toString(),
+        activityId: assignment.activityId?._id ? assignment.activityId._id.toString() : assignment.activityId?.toString() || null,
+        activityName: assignment.activityName || assignment.activityId?.name || 'Unknown Activity',
+        description: assignment.activityId?.description || '',
+        completionStatus: assignment.completionStatus,
+        score: assignment.score ?? null,
+        dueDate: toIsoOrNull(assignment.dueDate),
+        startedDate: toIsoOrNull(assignment.startedDate),
+        completedDate: toIsoOrNull(assignment.completedDate),
+        videoSubmitted: assignment.videoSubmitted === true
+      }));
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        childId: child._id.toString(),
+        childName: child.Name || 'Unknown',
+        childEmail: child.email || '',
+        therapistId: child.assignedTherapist?._id ? child.assignedTherapist._id.toString() : null,
+        therapistName: child.assignedTherapist?.Name || 'Not Assigned',
+        therapistEmail: child.assignedTherapist?.email || null,
+        stats: {
+          total: stats.total,
+          completed: stats.completed,
+          inProgress: stats.inProgress,
+          pending: stats.pending,
+          completionRate: stats.completionRate
+        },
+        lastActivityDate: toIsoOrNull(stats.lastActivityDate),
+        activities
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching child report detail:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching child report detail',
+      error: error.message
+    });
+  }
+});
 
 /**
  * @swagger
@@ -979,6 +1562,58 @@ router.get('/reports', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching reports',
+      error: error.message
+    });
+  }
+});
+
+// ==================== ADMIN ALERTS ====================
+
+router.get('/alerts/overdue', protect, async (req, res) => {
+  try {
+    if (!ADMIN_ROLES.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can access this endpoint'
+      });
+    }
+
+    const now = new Date();
+    const page = toPositiveInt(req.query.page, 1);
+    const limit = Math.min(toPositiveInt(req.query.limit, 20), 100);
+    const skip = (page - 1) * limit;
+
+    const filter = buildOverdueAssignmentFilter(now);
+    const total = await ActivityAssignment.countDocuments(filter);
+
+    const assignments = await ActivityAssignment.find(filter)
+      .select('_id childId activityId activityName dueDate completionStatus')
+      .populate({
+        path: 'childId',
+        select: 'Name assignedTherapist',
+        populate: {
+          path: 'assignedTherapist',
+          select: 'Name'
+        }
+      })
+      .populate('activityId', 'name')
+      .sort({ dueDate: 1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const data = assignments.map((assignment) => mapAssignmentToOverdueAlert(assignment, now));
+
+    res.status(200).json({
+      success: true,
+      total,
+      data
+    });
+  } catch (error) {
+    console.error('Error fetching admin overdue alerts:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching overdue alerts',
       error: error.message
     });
   }
@@ -1102,6 +1737,62 @@ router.get('/incomplete-activities', protect, async (req, res) => {
       message: 'Error fetching incomplete activities',
       error: error.message
     });
+  }
+});
+
+// ------------------ ADMIN: Assign therapist and create assignments ------------------
+router.put('/children/:id/assign-therapist-with-activities', protect, [
+  body('therapistId').notEmpty().withMessage('Therapist ID is required'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { therapistId } = req.body;
+
+    // Find child
+    const child = await User.findById(id);
+    if (!child || child.role !== 'child') {
+      return res.status(404).json({ success: false, message: 'Child not found' });
+    }
+
+    // Find therapist
+    const therapist = await User.findById(therapistId);
+    if (!therapist || therapist.role !== 'therapist') {
+      return res.status(404).json({ success: false, message: 'Therapist not found' });
+    }
+
+    // Authorization: only superuser (admin) can assign therapists
+    if (req.user.role !== 'superuser') {
+      return res.status(403).json({ success: false, message: 'Only admin can assign therapist to this child' });
+    }
+
+    // Update child's assigned therapist
+    const updatedChild = await User.findByIdAndUpdate(id, { assignedTherapist: therapistId }, { new: true, runValidators: false }).populate('assignedTherapist', 'Name email');
+
+    // Add child to therapist.assignedPatients set
+    await User.findByIdAndUpdate(therapistId, { $addToSet: { assignedPatients: updatedChild._id } });
+
+    // Auto-assign existing therapist-created activities to this child if not already assigned
+    const therapistActivities = await Activity.find({ createdBy: therapistId, createdByRole: 'therapist', isActive: true });
+
+    const assignmentsToCreate = [];
+    for (const act of therapistActivities) {
+      const exists = await ActivityAssignment.exists({ activityId: act._id, childId: updatedChild._id });
+      if (!exists) {
+        assignmentsToCreate.push({ activityId: act._id, childId: updatedChild._id, dueDate: act.dueDate || null, completionStatus: 'pending' });
+      }
+    }
+
+    let assignedCount = 0;
+    if (assignmentsToCreate.length > 0) {
+      const inserted = await ActivityAssignment.insertMany(assignmentsToCreate);
+      assignedCount = inserted.length;
+    }
+
+    res.status(200).json({ success: true, message: 'Therapist assigned and activities created', data: { id: updatedChild._id, name: updatedChild.Name, assignedTherapist: updatedChild.assignedTherapist, assignedActivitiesCreated: assignedCount } });
+  } catch (error) {
+    console.error('Error assigning therapist with activities:', error);
+    res.status(500).json({ success: false, message: 'Error assigning therapist', error: error.message });
   }
 });
 

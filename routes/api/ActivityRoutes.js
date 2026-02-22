@@ -4,6 +4,7 @@ const { body } = require('express-validator');
 const User = require('../../models/User');
 const Activity = require('../../models/Activity');
 const ActivityAssignment = require('../../models/ActivityAssignment');
+const { getMissingActivities, getActivities } = require('../../controllers/activityController');
 
 // ==================== MIDDLEWARE ====================
 const { protect } = require('../../middleware/auth');
@@ -259,6 +260,69 @@ router.get('/:id', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching activity',
+      error: error.message
+    });
+  }
+});
+
+// ==================== MISSING AND ALL ACTIVITIES ====================
+
+/**
+ * @swagger
+ * /api/activities/missing:
+ *   get:
+ *     summary: Get activities that are missing (not assigned to any child)
+ *     tags: [Activities]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of missing activities
+ */
+router.get('/activities/missing', protect, getMissingActivities);
+
+/**
+ * @swagger
+ * /api/activities/list:
+ *   get:
+ *     summary: Get all activities (Admin only)
+ *     tags: [Activities]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of all activities
+ */
+router.get('/activities/list', protect, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Only admin can access this route
+    if (userRole !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Admins only.'
+      });
+    }
+
+    const activities = await Activity.find()
+      .populate('createdBy', 'Name email role')
+      .sort({ createdAt: -1 });
+
+    const total = await Activity.countDocuments();
+
+    res.status(200).json({
+      success: true,
+      total,
+      count: activities.length,
+      data: activities
+    });
+  } catch (error) {
+    console.error('Error fetching activities list:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching activities list',
       error: error.message
     });
   }
