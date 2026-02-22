@@ -112,11 +112,11 @@ const AuthRoutes = require('./routes/api/AuthRoutes');
 app.use('/api/auth', AuthRoutes);
 console.log('Auth routes loaded at /api/auth');
 
-const AdminRoutes = require('./routes/api/AdminRoutes');
+const AdminRoutes = require('./routes/api/adminRoutes');
 app.use('/api/admin', AdminRoutes);
 console.log('Admin routes loaded at /api/admin');
 
-const TherapistRoutes = require('./routes/api/TherapistRoutes');
+const TherapistRoutes = require('./routes/api/therapistRoutes');
 app.use('/api/therapist', TherapistRoutes);
 console.log('Therapist routes loaded at /api/therapist');
 
