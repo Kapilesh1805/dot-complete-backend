@@ -27,6 +27,12 @@ const activitySchema = new mongoose.Schema({
     default: null, 
     maxlength: 1000
   },
+  durationMinutes: {
+    type: Number,
+    min: 1,
+    max: 240,
+    default: null
+  },
 
   // ==================== MEDIA ====================
   mediaUrls: [

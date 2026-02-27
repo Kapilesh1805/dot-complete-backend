@@ -257,7 +257,9 @@ router.post('/activities', protect, uploadActivityImage.single('image'), [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { name, description, assistance, dueDate } = req.body;
+    const { name, description, assistance, dueDate, durationMinutes } = req.body;
+    console.log('Incoming dueDate:', dueDate);
+    console.log('Incoming durationMinutes:', durationMinutes, 'type:', typeof durationMinutes);
     const steps = parseArrayField(req.body.steps);
     const mediaUrls = parseArrayField(req.body.mediaUrls);
     const userId = req.user.id;
@@ -311,12 +313,33 @@ router.post('/activities', protect, uploadActivityImage.single('image'), [
     }
 
     let parsedDueDate = null;
-    if (dueDate) {
+    if (dueDate !== undefined && dueDate !== null) {
       const parsed = new Date(dueDate);
-      if (!Number.isNaN(parsed.getTime())) {
-        parsedDueDate = parsed;
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid dueDate format'
+        });
       }
+      parsedDueDate = parsed;
     }
+
+    let parsedDurationMinutes = null;
+    if (
+      durationMinutes !== undefined &&
+      durationMinutes !== null &&
+      `${durationMinutes}`.trim() !== ''
+    ) {
+      const parsed = Number(durationMinutes);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 240) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid durationMinutes. Must be a positive number up to 240.'
+        });
+      }
+      parsedDurationMinutes = parsed;
+    }
+    console.log('Parsed durationMinutes:', parsedDurationMinutes);
 
     // Create activity
     const activity = await Activity.create({
@@ -324,11 +347,13 @@ router.post('/activities', protect, uploadActivityImage.single('image'), [
       description,
       steps: formattedSteps,
       assistance: assistance || null,
+      durationMinutes: parsedDurationMinutes,
       mediaUrls: formattedMediaUrls,
       createdBy: userId,
       createdByRole: userRole,
       isActive: true
     });
+    console.log('Saved activity durationMinutes:', activity.durationMinutes);
 
     // Assign to therapist's assigned children only
     const assignedChildren = await User.find({ 

@@ -57,7 +57,7 @@ router.get('/activities', protect, async (req, res) => {
     })
       .populate({
         path: 'activityId',
-        select: 'name description steps assistance mediaUrls dueDate createdAt'
+        select: 'name description steps assistance mediaUrls durationMinutes dueDate createdAt'
       })
       .sort({ createdAt: -1 });
 
@@ -65,7 +65,8 @@ router.get('/activities', protect, async (req, res) => {
       .filter((assignment) => assignment.activityId)
       .map((assignment) => {
         const assistance = assignment.activityId.assistance || null;
-        const dueDate = assignment.dueDate || assignment.activityId.dueDate || null;
+        const dueDate = assignment.dueDate || null;
+        console.log('Child API dueDate outgoing:', dueDate);
 
         return {
           assignmentId: assignment._id,
@@ -77,6 +78,7 @@ router.get('/activities', protect, async (req, res) => {
           assistanceModification: assistance ? [assistance] : [],
           assistance_modification: assistance,
           mediaUrls: assignment.activityId.mediaUrls,
+          durationMinutes: assignment.activityId.durationMinutes || null,
           dueDate,
           due_date: dueDate,
           completionStatus: assignment.getEffectiveStatus(),

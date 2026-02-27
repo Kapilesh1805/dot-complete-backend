@@ -27,13 +27,13 @@ const userSchema = new mongoose.Schema({
     enum: ['male', 'female', 'other'],
     trim: true,
     lowercase: true,
-    default: null,
+    default: undefined,
     set: (value) => {
-      if (value === undefined || value === null) return null;
+      if (value === undefined || value === null) return undefined;
       const normalized = String(value).trim().toLowerCase();
-      if (!normalized) return null;
+      if (!normalized) return undefined;
       if (normalized === 'prefer-not-to-say') return 'other'; // backward-compatible legacy value
-      return ['male', 'female', 'other'].includes(normalized) ? normalized : null;
+      return ['male', 'female', 'other'].includes(normalized) ? normalized : undefined;
     }
   },
   // Condition / diagnostic field for children (free-text, stored on user record)
@@ -151,14 +151,17 @@ userSchema.pre('validate', function(next) {
   if (this.gender !== undefined && this.gender !== null) {
     const normalized = String(this.gender).trim().toLowerCase();
     if (!normalized) {
-      this.gender = null;
+      this.gender = undefined;
     } else if (normalized === 'prefer-not-to-say') {
       this.gender = 'other';
     } else if (!['male', 'female', 'other'].includes(normalized)) {
-      this.gender = null;
+      this.gender = undefined;
     } else {
       this.gender = normalized;
     }
+  } else if (this.gender === null) {
+    // Allow legacy payloads that send explicit null for optional gender.
+    this.gender = undefined;
   }
   next();
 });
