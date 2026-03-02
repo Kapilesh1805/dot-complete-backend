@@ -430,11 +430,52 @@ router.get('/activities', protect, async (req, res) => {
       isActive: true 
     });
 
+    const activityIds = activities
+      .map((activity) => activity?._id)
+      .filter(Boolean);
+
+    let dueDateByActivityId = new Map();
+    if (activityIds.length) {
+      const assignmentDueDates = await ActivityAssignment.aggregate([
+        {
+          $match: {
+            isActive: true,
+            activityId: { $in: activityIds },
+            dueDate: { $ne: null }
+          }
+        },
+        { $sort: { dueDate: 1 } },
+        {
+          $group: {
+            _id: '$activityId',
+            dueDate: { $first: '$dueDate' }
+          }
+        }
+      ]);
+
+      dueDateByActivityId = new Map(
+        assignmentDueDates.map((row) => [row._id?.toString(), row.dueDate]),
+      );
+    }
+
+    const activitiesWithDueDate = activities.map((activity) => {
+      const serialized = activity.toObject();
+      const assignmentDueDate =
+          dueDateByActivityId.get(activity._id?.toString()) ?? null;
+      const finalDueDate = assignmentDueDate;
+
+      return {
+        ...serialized,
+        dueDate: finalDueDate,
+        due_date: finalDueDate,
+      };
+    });
+
     res.status(200).json({
       success: true,
       total,
-      count: activities.length,
-      data: activities
+      count: activitiesWithDueDate.length,
+      data: activitiesWithDueDate
     });
   } catch (error) {
     console.error('Error fetching activities:', error);
