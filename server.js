@@ -86,6 +86,45 @@ connectDB();
   }
 })();
 
+// ==================== STARTUP THERAPIST SEEDING ====================
+(async () => {
+  try {
+    const predefinedUsers = [
+      {
+        Name: 'DEVELOPMENTAL THERAPY UNIT',
+        firstName: 'Developmental',
+        lastName: 'Therapy Unit',
+        email: 'developmental.therapy@hospital.com',
+        password: 'therapy123',
+        role: 'superuser',
+        isEmailVerified: true,
+      },
+      {
+        Name: 'G BLOCK OPD',
+        firstName: 'G Block',
+        lastName: 'OPD',
+        email: 'gblock.opd@hospital.com',
+        password: 'opd123',
+        role: 'superuser',
+        isEmailVerified: true,
+      },
+    ];
+
+    for (const seedUser of predefinedUsers) {
+      const existingUser = await User.findOne({ email: seedUser.email });
+      if (existingUser) {
+        console.log(`Seed user already exists. Skipping: ${seedUser.email}`);
+        continue;
+      }
+
+      await User.create(seedUser);
+      console.log(`Seed user created: ${seedUser.email}`);
+    }
+  } catch (err) {
+    console.error('Failed to seed predefined therapist users:', err.message);
+  }
+})();
+
 // ==================== SWAGGER DOCUMENTATION ====================
 app.use(
   '/api/docs',
