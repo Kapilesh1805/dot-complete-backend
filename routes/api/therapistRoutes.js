@@ -404,6 +404,143 @@ router.post('/activities', protect, uploadActivityImage.single('image'), [
 
 /**
  * @swagger
+ * /api/therapist/activities/assign-child:
+ *   post:
+ *     summary: Assign a new activity to a specific child
+ *     description: Allows a therapist to create a personalized activity and assign it to only one specific child instead of all assigned children.
+ *     tags: [Therapist - Activities]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - childId
+ *               - activityName
+ *             properties:
+ *               childId:
+ *                 type: string
+ *                 description: ID of the child assigned to the therapist
+ *               activityName:
+ *                 type: string
+ *                 description: Name of the activity
+ *               description:
+ *                 type: string
+ *               steps:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               dueDate:
+ *                 type: string
+ *                 format: date
+ *     responses:
+ *       200:
+ *         description: Activity assigned successfully
+ *       403:
+ *         description: Unauthorized access (user not therapist)
+ *       404:
+ *         description: Child not found or not assigned to therapist
+ */
+router.post('/activities/assign-child', protect, [
+  body('childId').notEmpty().withMessage('childId is required'),
+  body('activityName').trim().notEmpty().withMessage('activityName is required'),
+  body('description').trim().notEmpty().withMessage('Description is required'),
+  body('steps').isArray({ min: 1 }).withMessage('At least one step is required'),
+  body('dueDate').notEmpty().withMessage('dueDate is required'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { childId, activityName, description, steps, dueDate } = req.body;
+    const therapistId = req.user.id;
+
+    if (req.user.role !== 'therapist') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only therapists can assign activities to a child'
+      });
+    }
+
+    const child = await User.findOne({
+      _id: childId,
+      role: 'child',
+      assignedTherapist: therapistId,
+      isActive: true
+    });
+
+    if (!child) {
+      return res.status(404).json({
+        success: false,
+        message: 'Child not found for this therapist'
+      });
+    }
+
+    const formattedSteps = steps
+      .map((step, index) => {
+        const descriptionText = typeof step === 'string'
+          ? step.trim()
+          : (step && typeof step.description === 'string' ? step.description.trim() : '');
+        return {
+          stepNumber: index + 1,
+          description: descriptionText
+        };
+      })
+      .filter((step) => step.description.length > 0);
+
+    if (!formattedSteps.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one step is required'
+      });
+    }
+
+    const parsedDueDate = new Date(dueDate);
+    if (Number.isNaN(parsedDueDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid dueDate format'
+      });
+    }
+
+    const activity = await Activity.create({
+      name: activityName,
+      description,
+      steps: formattedSteps,
+      createdBy: therapistId,
+      createdByRole: 'therapist',
+      isActive: true
+    });
+
+    const assignment = await ActivityAssignment.create({
+      activityId: activity._id,
+      childId: child._id,
+      activityName: activity.name,
+      completionStatus: 'pending',
+      dueDate: parsedDueDate
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Activity assigned to child successfully',
+      data: {
+        activity,
+        assignment
+      }
+    });
+  } catch (error) {
+    console.error('Error assigning activity to child:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error assigning activity to child',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
  * /api/therapist/activities:
  *   get:
  *     summary: Get therapist's activities

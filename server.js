@@ -11,6 +11,26 @@ const swaggerSpecs = require('./config/swagger');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
+const PORT = process.env.PORT || 5000;
+
+const normalizeBaseUrl = (value) => value.replace(/\/+$/, '');
+const resolveBaseUrl = (port) => {
+  const envUrl =
+    process.env.API_BASE_URL || process.env.BASE_URL || process.env.PUBLIC_URL;
+  if (envUrl) return normalizeBaseUrl(envUrl);
+
+  const host = process.env.HOST || 'localhost';
+  const hasPort = /:\d+$/.test(host);
+  const protocol =
+    process.env.HTTPS === 'true' || process.env.USE_HTTPS === 'true'
+      ? 'https'
+      : 'http';
+  const portSuffix = hasPort ? '' : `:${port}`;
+  return `${protocol}://${host}${portSuffix}`;
+};
+const baseUrl = resolveBaseUrl(PORT);
+const withBaseUrl = (pathValue) =>
+  `${baseUrl}${pathValue.startsWith('/') ? '' : '/'}${pathValue}`;
 
 const parseAllowedOrigins = (value) => {
   if (!value) return [];
@@ -149,28 +169,30 @@ app.get('/api/health', (req, res) => {
 // ==================== API ROUTES ====================
 const AuthRoutes = require('./routes/api/AuthRoutes');
 app.use('/api/auth', AuthRoutes);
-console.log('Auth routes loaded at /api/auth');
+console.log(`Auth routes loaded at ${withBaseUrl('/api/auth')}`);
 
 const AdminRoutes = require('./routes/api/adminRoutes');
 app.use('/api/admin', AdminRoutes);
-console.log('Admin routes loaded at /api/admin');
+console.log(`Admin routes loaded at ${withBaseUrl('/api/admin')}`);
 
 const TherapistRoutes = require('./routes/api/therapistRoutes');
 app.use('/api/therapist', TherapistRoutes);
-console.log('Therapist routes loaded at /api/therapist');
+console.log(`Therapist routes loaded at ${withBaseUrl('/api/therapist')}`);
 
 const ChildRoutes = require('./routes/api/ChildRoutes');
 app.use('/api/child', ChildRoutes);
-console.log('Child routes loaded at /api/child');
+console.log(`Child routes loaded at ${withBaseUrl('/api/child')}`);
 
 const GamesRoutes = require('./routes/api/gamesRoutes');
 app.use('/games', GamesRoutes);
 app.use('/api/games', GamesRoutes);
-console.log('Games routes loaded at /games and /api/games');
+console.log(
+  `Games routes loaded at ${withBaseUrl('/games')} and ${withBaseUrl('/api/games')}`
+);
 
 // Serve uploaded files from /uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
-console.log('Serving uploaded files from /uploads');
+console.log(`Serving uploaded files from ${withBaseUrl('/uploads')}`);
 
 // ==================== ERROR HANDLERS ====================
 app.use((err, req, res, next) => {
@@ -227,8 +249,6 @@ app.use('*', (req, res) => {
 });
 
 // ==================== START SERVER ====================
-const PORT = process.env.PORT || 5000;
-
 if (isProduction) {
   const clientBuildPath = path.join(__dirname, '..', 'frontend', 'build');
   if (fs.existsSync(clientBuildPath)) {
@@ -240,9 +260,9 @@ if (isProduction) {
 }
 
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-  console.log('API docs available at /api/docs');
-  console.log('Health check available at /api/health');
+  console.log(`Server listening at ${baseUrl}`);
+  console.log(`API docs available at ${withBaseUrl('/api/docs')}`);
+  console.log(`Health check available at ${withBaseUrl('/api/health')}`);
   if (isProduction) {
     console.log(
       `Allowed CORS origins: ${
